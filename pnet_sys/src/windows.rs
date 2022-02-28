@@ -8,7 +8,12 @@ use super::{htons, ntohs};
 pub mod public {
 
     use winapi::ctypes;
+    use winapi::shared::netioapi::{self, PMIB_MULTICASTIPADDRESS_TABLE};
+    use winapi::shared::ws2def::{SOCKADDR_IN, SOCKADDR, ADDRESS_FAMILY, IPPROTO_ICMPV6, IPPROTO_ICMP, INADDR_ANY, INADDR_NONE};
+    use winapi::shared::ws2ipdef::SOCKADDR_IN6;
     use winapi::shared::{in6addr, inaddr, ws2def, ws2ipdef};
+    use winapi::shared::minwindef::{DWORD, LPDWORD, LPVOID};
+    use winapi::shared::mstcpip::{SIO_RCVALL, RCVALL_ON};
     use winapi::um::winsock2;
     use super::{htons, ntohs};
     use std::io;
@@ -56,7 +61,62 @@ pub mod public {
     }
 
     pub unsafe fn socket(af: ctypes::c_int, sock: ctypes::c_int, proto: ctypes::c_int) -> CSocket {
-        winsock2::socket(af, sock, proto)
+        let socket: CSocket = winsock2::socket(af, sock, proto);
+
+        if af == AF_INET {
+            let mut addr: SOCKADDR_IN = mem::zeroed();
+            addr.sin_family = af as ADDRESS_FAMILY;
+            addr.sin_port = winsock2::ntohs(0);
+
+            if proto == IPPROTO_ICMP as i32 {
+                *addr.sin_addr.S_un.S_addr_mut() = INADDR_NONE;
+            } else {
+                *addr.sin_addr.S_un.S_addr_mut() = INADDR_ANY;
+            }
+
+            let error = winsock2::bind(socket,
+                &addr as *const SOCKADDR_IN as *const SOCKADDR,
+                mem::size_of::<SOCKADDR_IN>() as ctypes::c_int);
+            if error == winsock2::SOCKET_ERROR {
+                panic!("{}", std::io::Error::last_os_error());
+            }
+        } else if af == AF_INET6 {
+            let mut addr: SOCKADDR_IN6 = mem::zeroed();
+            addr.sin6_family = af as ADDRESS_FAMILY;
+            addr.sin6_port = winsock2::ntohs(0);
+
+            if proto == IPPROTO_ICMPV6 as i32 {
+                let mut table: PMIB_MULTICASTIPADDRESS_TABLE = mem::zeroed();
+                netioapi::GetMulticastIpAddressTable(AF_INET6 as u16, std::ptr::addr_of_mut!(table));
+                for entry in (*table).Table {
+                    *addr.sin6_addr.u.Byte_mut() = *entry.Address.Ipv6().sin6_addr.u.Byte();
+                }
+            } else {
+                *addr.sin6_addr.u.Byte_mut() = [0 as u8; 16];
+            }
+
+            let error = winsock2::bind(socket,
+                &addr as *const SOCKADDR_IN6 as *const SOCKADDR,
+                mem::size_of::<SOCKADDR_IN6>() as ctypes::c_int);
+            if error == winsock2::SOCKET_ERROR {
+                panic!("{}", std::io::Error::last_os_error());
+            }
+        }
+
+        if proto == IPPROTO_ICMP as i32 || proto == IPPROTO_ICMPV6 as i32 {
+            let in_opt = RCVALL_ON.to_le_bytes();
+            let out_opt = 0u32.to_le_bytes();
+            let returned = [0 as DWORD; 0];
+            winsock2::WSAIoctl(socket, SIO_RCVALL,
+                            &in_opt as *const u8 as LPVOID,
+                            in_opt.len() as DWORD,
+                            &out_opt as *const u8 as LPVOID,
+                            out_opt.len() as DWORD,
+                            &returned as *const DWORD as LPDWORD,
+                            std::ptr::null_mut(), None);
+        }
+        
+        return socket;
     }
 
     pub unsafe fn setsockopt(
